@@ -28,17 +28,24 @@ export function PropertiesPanel() {
   const selectedObject = findObject(selectedIds[0]);
   const focusedInput = useRef<string | null>(null);
 
+  // Get group rotation for children inside groups (effective rotation = group + child)
+  const parentGroup = enteredGroupId ? objects.find(o => o.id === enteredGroupId) : null;
+  const groupRotation = parentGroup?.rotation || 0;
+
   // Sync from store to local — but skip fields the user is actively editing
   useEffect(() => {
     if (selectedObject) {
       setLocalValues(prev => {
+        const effectiveRotation = parentGroup
+          ? Math.round(groupRotation + (selectedObject.rotation || 0))
+          : Math.round(selectedObject.rotation);
         const next = {
           x: Math.round(selectedObject.x), y: Math.round(selectedObject.y),
           width: Math.round(selectedObject.width), height: Math.round(selectedObject.height),
           fill: selectedObject.fill, stroke: selectedObject.stroke,
           strokeWidth: selectedObject.strokeWidth, opacity: selectedObject.opacity,
           name: selectedObject.name, text: selectedObject.text || '',
-          fontSize: selectedObject.fontSize || 16, rotation: Math.round(selectedObject.rotation),
+          fontSize: selectedObject.fontSize || 16, rotation: effectiveRotation,
           borderRadius: selectedObject.borderRadius || 0,
           points: selectedObject.points || (selectedObject.type === 'star' ? 5 : 6),
         };
@@ -49,12 +56,17 @@ export function PropertiesPanel() {
         return next;
       });
     }
-  }, [selectedObject]);
+  }, [selectedObject, parentGroup, groupRotation]);
 
   const handleChange = (key: string, value: string | number) => {
     setLocalValues((prev) => ({ ...prev, [key]: value }));
     if (selectedObject && !selectedObject.locked) {
-      updateObject(selectedObject.id, { [key]: value });
+      // For rotation of children inside groups, subtract parent rotation
+      if (key === 'rotation' && parentGroup) {
+        updateObject(selectedObject.id, { rotation: (value as number) - groupRotation });
+      } else {
+        updateObject(selectedObject.id, { [key]: value });
+      }
     }
   };
 

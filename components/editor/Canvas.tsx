@@ -60,17 +60,32 @@ export function Canvas() {
 
   // Helper to find the selected object — works for both top-level and group children.
   // Returns { obj, absX, absY } where absX/absY are absolute canvas coordinates.
-  const findSelectedObj = useCallback((id: string): { obj: DesignObject; absX: number; absY: number } | null => {
+  const findSelectedObj = useCallback((id: string): { obj: DesignObject; absX: number; absY: number; groupRotation: number } | null => {
     const top = objects.find(o => o.id === id);
-    if (top) return { obj: top, absX: top.x, absY: top.y };
+    if (top) return { obj: top, absX: top.x, absY: top.y, groupRotation: 0 };
     if (enteredGroupId) {
       const group = objects.find(o => o.id === enteredGroupId);
       if (group?.children) {
         const child = group.children.find(c => c.id === id);
-        if (child) return { obj: child, absX: group.x + child.x, absY: group.y + child.y };
+        if (child) return { obj: child, absX: group.x + child.x, absY: group.y + child.y, groupRotation: group.rotation || 0 };
       }
     }
     return null;
+  }, [objects, enteredGroupId]);
+
+  // Transform a canvas-space point into the group's unrotated coordinate space.
+  // Inside this space, children are axis-aligned at (group.x + child.x, group.y + child.y).
+  const toGroupLocal = useCallback((px: number, py: number): { x: number; y: number } => {
+    if (!enteredGroupId) return { x: px, y: py };
+    const group = objects.find(o => o.id === enteredGroupId);
+    if (!group || !group.rotation) return { x: px, y: py };
+    const gcx = group.x + group.width / 2, gcy = group.y + group.height / 2;
+    const rad = (group.rotation * Math.PI) / 180;
+    const cos = Math.cos(rad), sin = Math.sin(rad);
+    return {
+      x: cos * (px - gcx) + sin * (py - gcy) + gcx,
+      y: -sin * (px - gcx) + cos * (py - gcy) + gcy,
+    };
   }, [objects, enteredGroupId]);
 
   const screenToCanvas = useCallback((x: number, y: number) => {
@@ -149,13 +164,16 @@ export function Canvas() {
     if (currentTool === 'image') { fileInputRef.current?.click(); return; }
 
     if (currentTool === 'select') {
+      // Transform point to group-local space for all handle checks inside groups
+      const lp = toGroupLocal(point.x, point.y);
+
       // Check rotation handle (works for both top-level and group children)
       if (selectedIds.length === 1) {
         const found = findSelectedObj(selectedIds[0]);
-        if (found && !found.obj.locked && isOnRotationHandle(point.x, point.y, found.obj, found.absX, found.absY)) {
+        if (found && !found.obj.locked && isOnRotationHandle(lp.x, lp.y, found.obj, found.absX, found.absY)) {
           const cx = found.absX + found.obj.width / 2;
           const cy = found.absY + found.obj.height / 2;
-          const angle = Math.atan2(point.y - cy, point.x - cx);
+          const angle = Math.atan2(lp.y - cy, lp.x - cx);
           setIsRotating(true);
           setRotateStart({ angle, objRotation: found.obj.rotation });
           saveToHistory();
@@ -167,24 +185,24 @@ export function Canvas() {
       if (selectedIds.length === 1) {
         const found = findSelectedObj(selectedIds[0]);
         if (found && !found.obj.locked) {
-          const handle = getResizeHandleAtPoint(point.x, point.y, found.obj, found.absX, found.absY);
+          const handle = getResizeHandleAtPoint(lp.x, lp.y, found.obj, found.absX, found.absY);
           if (handle) {
             saveToHistory();
             setIsResizing(true);
             setResizeHandle(handle);
-            setResizeStart({ x: point.x, y: point.y, width: found.obj.width, height: found.obj.height, objX: found.obj.x, objY: found.obj.y, rotation: found.obj.rotation || 0 });
+            setResizeStart({ x: lp.x, y: lp.y, width: found.obj.width, height: found.obj.height, objX: found.obj.x, objY: found.obj.y, rotation: found.obj.rotation || 0 });
             return;
           }
         }
       }
 
-      // Inside a group — handle child selection/drag
+      // Inside a group — handle child selection/drag (use group-local point)
       if (enteredGroupId) {
         const group = objects.find(o => o.id === enteredGroupId);
         if (group?.children) {
           const clickedChild = [...group.children].reverse().find(child =>
             child.visible && !child.locked &&
-            pointInRect(point.x, point.y, group.x + child.x, group.y + child.y, child.width, child.height)
+            pointInRect(lp.x, lp.y, group.x + child.x, group.y + child.y, child.width, child.height)
           );
           if (clickedChild) {
             if (e.shiftKey) {
@@ -197,7 +215,7 @@ export function Canvas() {
               setSelectedIds(newSelected);
               saveToHistory();
               setIsDragging(true);
-              setDragStart(point);
+              setDragStart(lp);
               const starts: Record<string, { x: number; y: number }> = {};
               for (const id of newSelected) {
                 const c = group.children.find(ch => ch.id === id);
@@ -208,7 +226,7 @@ export function Canvas() {
             return;
           }
           // Click inside group area but not on a child — deselect
-          if (pointInRect(point.x, point.y, group.x, group.y, group.width, group.height)) {
+          if (pointInRect(lp.x, lp.y, group.x, group.y, group.width, group.height)) {
             clearSelection();
             return;
           }
@@ -257,10 +275,11 @@ export function Canvas() {
     // Drawing tools
     setIsDrawing(true);
     setDrawingStart(point);
-  }, [currentTool, screenToCanvas, objects, selectedIds, setSelectedIds, clearSelection, setIsDrawing, setDrawingStart, canvas.offsetX, canvas.offsetY, getResizeHandleAtPoint, saveToHistory, editingTextId, isOnRotationHandle, enteredGroupId, setEnteredGroupId, findSelectedObj]);
+  }, [currentTool, screenToCanvas, objects, selectedIds, setSelectedIds, clearSelection, setIsDrawing, setDrawingStart, canvas.offsetX, canvas.offsetY, getResizeHandleAtPoint, saveToHistory, editingTextId, isOnRotationHandle, enteredGroupId, setEnteredGroupId, findSelectedObj, toGroupLocal]);
 
   const handlePointerMove = useCallback((e: React.PointerEvent) => {
     const point = screenToCanvas(e.clientX, e.clientY);
+    const lp = toGroupLocal(point.x, point.y);
 
     if (isPanning) {
       setCanvas({ offsetX: e.clientX - panStart.x, offsetY: e.clientY - panStart.y });
@@ -272,7 +291,7 @@ export function Canvas() {
       if (found) {
         const cx = found.absX + found.obj.width / 2;
         const cy = found.absY + found.obj.height / 2;
-        const angle = Math.atan2(point.y - cy, point.x - cx);
+        const angle = Math.atan2(lp.y - cy, lp.x - cx);
         let deg = rotateStart.objRotation + ((angle - rotateStart.angle) * 180) / Math.PI;
         if (shiftHeld) deg = Math.round(deg / 15) * 15; // snap to 15 degrees
         updateObject(found.obj.id, { rotation: deg });
@@ -301,8 +320,8 @@ export function Canvas() {
         // Compute delta in the object's local (unrotated) coordinate space
         const rad = resizeStart.rotation * Math.PI / 180;
         const cosN = Math.cos(-rad), sinN = Math.sin(-rad);
-        const rawDx = point.x - resizeStart.x;
-        const rawDy = point.y - resizeStart.y;
+        const rawDx = lp.x - resizeStart.x;
+        const rawDy = lp.y - resizeStart.y;
         const dx = cosN * rawDx - sinN * rawDy;
         const dy = sinN * rawDx + cosN * rawDy;
 
@@ -361,8 +380,8 @@ export function Canvas() {
     }
 
     if (isDragging && selectedIds.length > 0) {
-      let dx = point.x - dragStart.x;
-      let dy = point.y - dragStart.y;
+      let dx = lp.x - dragStart.x;
+      let dy = lp.y - dragStart.y;
 
       // Snap guides only for top-level objects (not children inside groups)
       if (!enteredGroupId) {
@@ -436,17 +455,19 @@ export function Canvas() {
     if (currentTool === 'select' && selectedIds.length === 1 && !isDragging && !isResizing && !isRotating) {
       const found = findSelectedObj(selectedIds[0]);
       if (found && !found.obj.locked) {
-        if (isOnRotationHandle(point.x, point.y, found.obj, found.absX, found.absY)) {
+        if (isOnRotationHandle(lp.x, lp.y, found.obj, found.absX, found.absY)) {
           if (canvasRef.current) canvasRef.current.style.cursor = 'grab';
           return;
         }
-        const handle = getResizeHandleAtPoint(point.x, point.y, found.obj, found.absX, found.absY);
+        const handle = getResizeHandleAtPoint(lp.x, lp.y, found.obj, found.absX, found.absY);
         if (handle && canvasRef.current) {
           // Base angle for each handle (degrees, clockwise from north)
+          // Use effective rotation (group + child) for cursor direction
           const baseAngles: Record<string, number> = { n: 0, ne: 45, e: 90, se: 135, s: 180, sw: 225, w: 270, nw: 315 };
           // 4 cursor types cycling every 45°
           const cursorCycle = ['ns-resize', 'nesw-resize', 'ew-resize', 'nwse-resize'];
-          const angle = ((baseAngles[handle] + (found.obj.rotation || 0)) % 360 + 360) % 360;
+          const effectiveRot = (found.groupRotation || 0) + (found.obj.rotation || 0);
+          const angle = ((baseAngles[handle] + effectiveRot) % 360 + 360) % 360;
           const idx = Math.round(angle / 45) % 4;
           canvasRef.current.style.cursor = cursorCycle[idx];
         } else if (canvasRef.current) {
@@ -454,7 +475,7 @@ export function Canvas() {
         }
       }
     }
-  }, [isPanning, panStart, isRotating, rotateStart, shiftHeld, isMarquee, marqueeStart, isResizing, selectedIds, resizeHandle, objects, resizeStart, updateObject, isDragging, drawingStart, currentTool, screenToCanvas, setCanvas, dragStart, dragObjectStarts, getResizeHandleAtPoint, isOnRotationHandle, setSelectedIds, enteredGroupId, findSelectedObj]);
+  }, [isPanning, panStart, isRotating, rotateStart, shiftHeld, isMarquee, marqueeStart, isResizing, selectedIds, resizeHandle, objects, resizeStart, updateObject, isDragging, drawingStart, currentTool, screenToCanvas, setCanvas, dragStart, dragObjectStarts, getResizeHandleAtPoint, isOnRotationHandle, setSelectedIds, enteredGroupId, findSelectedObj, toGroupLocal]);
 
   const handlePointerUp = useCallback((e: React.PointerEvent) => {
     if (isPanning) { setIsPanning(false); return; }
@@ -515,6 +536,7 @@ export function Canvas() {
   const handleDoubleClick = useCallback((e: React.MouseEvent) => {
     if (currentTool !== 'select') return;
     const point = screenToCanvas(e.clientX, e.clientY);
+    const lp = toGroupLocal(point.x, point.y);
 
     // If inside a group, check for text children to edit
     if (enteredGroupId) {
@@ -522,7 +544,7 @@ export function Canvas() {
       if (group?.children) {
         const child = [...group.children].reverse().find(c =>
           c.type === 'text' && c.visible && !c.locked &&
-          pointInRect(point.x, point.y, group.x + c.x, group.y + c.y, c.width, c.height || 30)
+          pointInRect(lp.x, lp.y, group.x + c.x, group.y + c.y, c.width, c.height || 30)
         );
         if (child) {
           setEditingTextId(child.id);
@@ -559,7 +581,7 @@ export function Canvas() {
       setSelectedIds([clicked.id]);
       setTimeout(() => textInputRef.current?.focus(), 50);
     }
-  }, [currentTool, objects, screenToCanvas, setSelectedIds, enteredGroupId, setEnteredGroupId]);
+  }, [currentTool, objects, screenToCanvas, setSelectedIds, enteredGroupId, setEnteredGroupId, toGroupLocal]);
 
   // Right-click context menu
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
@@ -690,8 +712,8 @@ export function Canvas() {
     e.target.value = '';
   }, [addObject, setSelectedIds, setCurrentTool]);
 
-  // Rendering — handles rotate with the object
-  const renderResizeHandles = (obj: DesignObject, absX?: number, absY?: number) => {
+  // Rendering — handles rotate with the object. rotationOverride for group children (effective rotation).
+  const renderResizeHandles = (obj: DesignObject, absX?: number, absY?: number, rotationOverride?: number) => {
     if (!selectedIds.includes(obj.id) || obj.locked) return null;
     const ox = absX ?? obj.x, oy = absY ?? obj.y;
     const handles = [
@@ -705,7 +727,7 @@ export function Canvas() {
     const rotHandleX = ox + obj.width / 2;
     // Rotate the entire handles group around the object's center
     const cx = ox + obj.width / 2, cy = oy + obj.height / 2;
-    const rotation = obj.rotation || 0;
+    const rotation = rotationOverride ?? (obj.rotation || 0);
     return (
       <g className="resize-handles" transform={`rotate(${rotation} ${cx} ${cy})`}>
         <rect x={ox - 2} y={oy - 2} width={obj.width + 4} height={obj.height + 4}
@@ -846,24 +868,24 @@ export function Canvas() {
           const group = objects.find(o => o.id === enteredGroupId);
           if (!group) return null;
           return (
-            <>
-              <rect x={group.x - 1} y={group.y - 1} width={group.width + 2} height={group.height + 2}
+            <g transform={`translate(${group.x}, ${group.y}) rotate(${group.rotation || 0} ${group.width / 2} ${group.height / 2})`}>
+              <rect x={-1} y={-1} width={group.width + 2} height={group.height + 2}
                 fill="none" stroke="#0d99ff" strokeWidth={1.5 / canvas.scale}
                 strokeDasharray={`${6 / canvas.scale} ${3 / canvas.scale}`}
                 pointerEvents="none" opacity={0.5} />
               {group.children?.filter(c => selectedIds.includes(c.id)).map(child => (
                 <React.Fragment key={`sel-${child.id}`}>
                   {selectedIds.length === 1 && !child.locked
-                    ? renderResizeHandles(child, group.x + child.x, group.y + child.y)
+                    ? renderResizeHandles(child)
                     : <rect
-                        x={group.x + child.x - 1} y={group.y + child.y - 1}
+                        x={child.x - 1} y={child.y - 1}
                         width={child.width + 2} height={child.height + 2}
                         fill="none" stroke="#0d99ff" strokeWidth={2 / canvas.scale}
                         pointerEvents="none" />
                   }
                 </React.Fragment>
               ))}
-            </>
+            </g>
           );
         })()}
 
@@ -895,8 +917,20 @@ export function Canvas() {
         const obj = found.obj;
         const rect = canvasRef.current?.getBoundingClientRect();
         if (!rect) return null;
-        const left = found.absX * canvas.scale + canvas.offsetX + rect.left;
-        const top = found.absY * canvas.scale + canvas.offsetY + rect.top;
+        // For group children, compute the canvas-space position by applying group rotation
+        let visX = found.absX, visY = found.absY;
+        if (found.groupRotation && enteredGroupId) {
+          const group = objects.find(o => o.id === enteredGroupId);
+          if (group) {
+            const gcx = group.x + group.width / 2, gcy = group.y + group.height / 2;
+            const grad = (found.groupRotation * Math.PI) / 180;
+            const gc = Math.cos(grad), gs = Math.sin(grad);
+            visX = gc * (found.absX - gcx) - gs * (found.absY - gcy) + gcx;
+            visY = gs * (found.absX - gcx) + gc * (found.absY - gcy) + gcy;
+          }
+        }
+        const left = visX * canvas.scale + canvas.offsetX + rect.left;
+        const top = visY * canvas.scale + canvas.offsetY + rect.top;
         return (
           <input ref={textInputRef} type="text" value={obj.text || ''}
             onChange={(e) => updateObject(obj.id, { text: e.target.value })}

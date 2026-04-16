@@ -107,7 +107,34 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   updateObject: (id, updates) => set((s) => {
     const updateDeep = (objs: DesignObject[]): DesignObject[] =>
       objs.map(x => {
-        if (x.id === id) return { ...x, ...updates };
+        if (x.id === id) {
+          const updated = { ...x, ...updates };
+          // When resizing a group/frame, proportionally scale children
+          if (updated.children && updated.children.length > 0 &&
+              (updates.width !== undefined || updates.height !== undefined)) {
+            const scaleX = x.width > 0 ? (updates.width ?? x.width) / x.width : 1;
+            const scaleY = x.height > 0 ? (updates.height ?? x.height) / x.height : 1;
+            if (scaleX !== 1 || scaleY !== 1) {
+              const scaleChildren = (children: DesignObject[]): DesignObject[] =>
+                children.map(c => {
+                  const scaled: DesignObject = {
+                    ...c,
+                    x: c.x * scaleX,
+                    y: c.y * scaleY,
+                    width: c.width * scaleX,
+                    height: c.height * scaleY,
+                    fontSize: c.fontSize ? c.fontSize * Math.min(scaleX, scaleY) : c.fontSize,
+                    strokeWidth: c.strokeWidth ? c.strokeWidth * Math.min(scaleX, scaleY) : c.strokeWidth,
+                    borderRadius: c.borderRadius ? c.borderRadius * Math.min(scaleX, scaleY) : c.borderRadius,
+                  };
+                  if (c.children) scaled.children = scaleChildren(c.children);
+                  return scaled;
+                });
+              updated.children = scaleChildren(updated.children);
+            }
+          }
+          return updated;
+        }
         if (x.children) return { ...x, children: updateDeep(x.children) };
         return x;
       });
