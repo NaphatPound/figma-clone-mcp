@@ -5,8 +5,10 @@ import { Canvas } from '@/components/editor/Canvas';
 import { LayersPanel } from '@/components/editor/LayersPanel';
 import { PropertiesPanel } from '@/components/editor/PropertiesPanel';
 import { TopBar } from '@/components/editor/TopBar';
+import { useServerSync } from '@/lib/useServerSync';
 
 export default function Home() {
+  useServerSync();
   return (
     <div className="flex flex-col h-screen bg-[#1e1e1e] text-white">
       <TopBar />
