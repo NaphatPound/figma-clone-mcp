@@ -58,6 +58,21 @@ export function Canvas() {
   const HANDLE_SIZE = 8 / canvas.scale;
   const HANDLE_HIT_SIZE = 16 / canvas.scale;
 
+  // Helper to find the selected object — works for both top-level and group children.
+  // Returns { obj, absX, absY } where absX/absY are absolute canvas coordinates.
+  const findSelectedObj = useCallback((id: string): { obj: DesignObject; absX: number; absY: number } | null => {
+    const top = objects.find(o => o.id === id);
+    if (top) return { obj: top, absX: top.x, absY: top.y };
+    if (enteredGroupId) {
+      const group = objects.find(o => o.id === enteredGroupId);
+      if (group?.children) {
+        const child = group.children.find(c => c.id === id);
+        if (child) return { obj: child, absX: group.x + child.x, absY: group.y + child.y };
+      }
+    }
+    return null;
+  }, [objects, enteredGroupId]);
+
   const screenToCanvas = useCallback((x: number, y: number) => {
     const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect) return { x: 0, y: 0 };
@@ -76,16 +91,18 @@ export function Canvas() {
     return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); };
   }, []);
 
-  const getResizeHandleAtPoint = useCallback((x: number, y: number, obj: DesignObject): ResizeHandle => {
+  // absX/absY: absolute position on canvas (for group children: group.x + child.x)
+  const getResizeHandleAtPoint = useCallback((x: number, y: number, obj: DesignObject, absX?: number, absY?: number): ResizeHandle => {
+    const ox = absX ?? obj.x, oy = absY ?? obj.y;
     const handles = [
-      { name: 'nw' as const, x: obj.x, y: obj.y },
-      { name: 'n' as const, x: obj.x + obj.width / 2, y: obj.y },
-      { name: 'ne' as const, x: obj.x + obj.width, y: obj.y },
-      { name: 'e' as const, x: obj.x + obj.width, y: obj.y + obj.height / 2 },
-      { name: 'se' as const, x: obj.x + obj.width, y: obj.y + obj.height },
-      { name: 's' as const, x: obj.x + obj.width / 2, y: obj.y + obj.height },
-      { name: 'sw' as const, x: obj.x, y: obj.y + obj.height },
-      { name: 'w' as const, x: obj.x, y: obj.y + obj.height / 2 },
+      { name: 'nw' as const, x: ox, y: oy },
+      { name: 'n' as const, x: ox + obj.width / 2, y: oy },
+      { name: 'ne' as const, x: ox + obj.width, y: oy },
+      { name: 'e' as const, x: ox + obj.width, y: oy + obj.height / 2 },
+      { name: 'se' as const, x: ox + obj.width, y: oy + obj.height },
+      { name: 's' as const, x: ox + obj.width / 2, y: oy + obj.height },
+      { name: 'sw' as const, x: ox, y: oy + obj.height },
+      { name: 'w' as const, x: ox, y: oy + obj.height / 2 },
     ];
     for (const h of handles) {
       if (distance(x, y, h.x, h.y) <= HANDLE_HIT_SIZE) return h.name;
@@ -94,9 +111,10 @@ export function Canvas() {
   }, [HANDLE_HIT_SIZE]);
 
   // Check rotation handle hit (circle above top-center)
-  const isOnRotationHandle = useCallback((x: number, y: number, obj: DesignObject): boolean => {
-    const handleY = obj.y - 30 / canvas.scale;
-    const handleX = obj.x + obj.width / 2;
+  const isOnRotationHandle = useCallback((x: number, y: number, obj: DesignObject, absX?: number, absY?: number): boolean => {
+    const ox = absX ?? obj.x, oy = absY ?? obj.y;
+    const handleY = oy - 30 / canvas.scale;
+    const handleX = ox + obj.width / 2;
     return distance(x, y, handleX, handleY) <= HANDLE_HIT_SIZE;
   }, [canvas.scale, HANDLE_HIT_SIZE]);
 
@@ -114,30 +132,30 @@ export function Canvas() {
     if (currentTool === 'image') { fileInputRef.current?.click(); return; }
 
     if (currentTool === 'select') {
-      // Check rotation handle
+      // Check rotation handle (works for both top-level and group children)
       if (selectedIds.length === 1) {
-        const selObj = objects.find(o => o.id === selectedIds[0]);
-        if (selObj && !selObj.locked && isOnRotationHandle(point.x, point.y, selObj)) {
-          const cx = selObj.x + selObj.width / 2;
-          const cy = selObj.y + selObj.height / 2;
+        const found = findSelectedObj(selectedIds[0]);
+        if (found && !found.obj.locked && isOnRotationHandle(point.x, point.y, found.obj, found.absX, found.absY)) {
+          const cx = found.absX + found.obj.width / 2;
+          const cy = found.absY + found.obj.height / 2;
           const angle = Math.atan2(point.y - cy, point.x - cx);
           setIsRotating(true);
-          setRotateStart({ angle, objRotation: selObj.rotation });
+          setRotateStart({ angle, objRotation: found.obj.rotation });
           saveToHistory();
           return;
         }
       }
 
-      // Check resize handles
+      // Check resize handles (works for both top-level and group children)
       if (selectedIds.length === 1) {
-        const selObj = objects.find(o => o.id === selectedIds[0]);
-        if (selObj && !selObj.locked) {
-          const handle = getResizeHandleAtPoint(point.x, point.y, selObj);
+        const found = findSelectedObj(selectedIds[0]);
+        if (found && !found.obj.locked) {
+          const handle = getResizeHandleAtPoint(point.x, point.y, found.obj, found.absX, found.absY);
           if (handle) {
             saveToHistory();
             setIsResizing(true);
             setResizeHandle(handle);
-            setResizeStart({ x: point.x, y: point.y, width: selObj.width, height: selObj.height, objX: selObj.x, objY: selObj.y });
+            setResizeStart({ x: point.x, y: point.y, width: found.obj.width, height: found.obj.height, objX: found.obj.x, objY: found.obj.y });
             return;
           }
         }
@@ -222,7 +240,7 @@ export function Canvas() {
     // Drawing tools
     setIsDrawing(true);
     setDrawingStart(point);
-  }, [currentTool, screenToCanvas, objects, selectedIds, setSelectedIds, clearSelection, setIsDrawing, setDrawingStart, canvas.offsetX, canvas.offsetY, getResizeHandleAtPoint, saveToHistory, editingTextId, isOnRotationHandle, enteredGroupId, setEnteredGroupId]);
+  }, [currentTool, screenToCanvas, objects, selectedIds, setSelectedIds, clearSelection, setIsDrawing, setDrawingStart, canvas.offsetX, canvas.offsetY, getResizeHandleAtPoint, saveToHistory, editingTextId, isOnRotationHandle, enteredGroupId, setEnteredGroupId, findSelectedObj]);
 
   const handlePointerMove = useCallback((e: React.PointerEvent) => {
     const point = screenToCanvas(e.clientX, e.clientY);
@@ -233,14 +251,14 @@ export function Canvas() {
     }
 
     if (isRotating && selectedIds.length === 1) {
-      const obj = objects.find(o => o.id === selectedIds[0]);
-      if (obj) {
-        const cx = obj.x + obj.width / 2;
-        const cy = obj.y + obj.height / 2;
+      const found = findSelectedObj(selectedIds[0]);
+      if (found) {
+        const cx = found.absX + found.obj.width / 2;
+        const cy = found.absY + found.obj.height / 2;
         const angle = Math.atan2(point.y - cy, point.x - cx);
         let deg = rotateStart.objRotation + ((angle - rotateStart.angle) * 180) / Math.PI;
         if (shiftHeld) deg = Math.round(deg / 15) * 15; // snap to 15 degrees
-        updateObject(obj.id, { rotation: deg });
+        updateObject(found.obj.id, { rotation: deg });
       }
       return;
     }
@@ -260,7 +278,8 @@ export function Canvas() {
     }
 
     if (isResizing && selectedIds.length === 1 && resizeHandle) {
-      const obj = objects.find(o => o.id === selectedIds[0]);
+      const found = findSelectedObj(selectedIds[0]);
+      const obj = found?.obj;
       if (obj && !obj.locked) {
         const dx = point.x - resizeStart.x;
         const dy = point.y - resizeStart.y;
@@ -379,20 +398,20 @@ export function Canvas() {
       setTempObject(newObject);
     }
 
-    // Cursor for resize handles
+    // Cursor for resize handles (works for both top-level and group children)
     if (currentTool === 'select' && selectedIds.length === 1 && !isDragging && !isResizing && !isRotating) {
-      const selObj = objects.find(o => o.id === selectedIds[0]);
-      if (selObj && !selObj.locked) {
-        if (isOnRotationHandle(point.x, point.y, selObj)) {
+      const found = findSelectedObj(selectedIds[0]);
+      if (found && !found.obj.locked) {
+        if (isOnRotationHandle(point.x, point.y, found.obj, found.absX, found.absY)) {
           if (canvasRef.current) canvasRef.current.style.cursor = 'grab';
           return;
         }
-        const handle = getResizeHandleAtPoint(point.x, point.y, selObj);
+        const handle = getResizeHandleAtPoint(point.x, point.y, found.obj, found.absX, found.absY);
         const cursors: Record<string, string> = { nw: 'nwse-resize', se: 'nwse-resize', ne: 'nesw-resize', sw: 'nesw-resize', n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize' };
         if (canvasRef.current) canvasRef.current.style.cursor = handle ? cursors[handle] || 'default' : 'default';
       }
     }
-  }, [isPanning, panStart, isRotating, rotateStart, shiftHeld, isMarquee, marqueeStart, isResizing, selectedIds, resizeHandle, objects, resizeStart, updateObject, isDragging, drawingStart, currentTool, screenToCanvas, setCanvas, dragStart, dragObjectStarts, getResizeHandleAtPoint, isOnRotationHandle, setSelectedIds, enteredGroupId]);
+  }, [isPanning, panStart, isRotating, rotateStart, shiftHeld, isMarquee, marqueeStart, isResizing, selectedIds, resizeHandle, objects, resizeStart, updateObject, isDragging, drawingStart, currentTool, screenToCanvas, setCanvas, dragStart, dragObjectStarts, getResizeHandleAtPoint, isOnRotationHandle, setSelectedIds, enteredGroupId, findSelectedObj]);
 
   const handlePointerUp = useCallback((e: React.PointerEvent) => {
     if (isPanning) { setIsPanning(false); return; }
@@ -628,28 +647,29 @@ export function Canvas() {
     e.target.value = '';
   }, [addObject, setSelectedIds, setCurrentTool]);
 
-  // Rendering
-  const renderResizeHandles = (obj: DesignObject) => {
+  // Rendering — handles at absolute canvas coordinates
+  const renderResizeHandles = (obj: DesignObject, absX?: number, absY?: number) => {
     if (!selectedIds.includes(obj.id) || obj.locked) return null;
+    const ox = absX ?? obj.x, oy = absY ?? obj.y;
     const handles = [
-      { name: 'nw', x: obj.x, y: obj.y }, { name: 'n', x: obj.x + obj.width / 2, y: obj.y },
-      { name: 'ne', x: obj.x + obj.width, y: obj.y }, { name: 'e', x: obj.x + obj.width, y: obj.y + obj.height / 2 },
-      { name: 'se', x: obj.x + obj.width, y: obj.y + obj.height }, { name: 's', x: obj.x + obj.width / 2, y: obj.y + obj.height },
-      { name: 'sw', x: obj.x, y: obj.y + obj.height }, { name: 'w', x: obj.x, y: obj.y + obj.height / 2 },
+      { name: 'nw', x: ox, y: oy }, { name: 'n', x: ox + obj.width / 2, y: oy },
+      { name: 'ne', x: ox + obj.width, y: oy }, { name: 'e', x: ox + obj.width, y: oy + obj.height / 2 },
+      { name: 'se', x: ox + obj.width, y: oy + obj.height }, { name: 's', x: ox + obj.width / 2, y: oy + obj.height },
+      { name: 'sw', x: ox, y: oy + obj.height }, { name: 'w', x: ox, y: oy + obj.height / 2 },
     ];
     const hs = HANDLE_SIZE, half = hs / 2;
-    const rotHandleY = obj.y - 30 / canvas.scale;
-    const rotHandleX = obj.x + obj.width / 2;
+    const rotHandleY = oy - 30 / canvas.scale;
+    const rotHandleX = ox + obj.width / 2;
     return (
       <g className="resize-handles">
-        <rect x={obj.x - 2} y={obj.y - 2} width={obj.width + 4} height={obj.height + 4}
+        <rect x={ox - 2} y={oy - 2} width={obj.width + 4} height={obj.height + 4}
           fill="none" stroke="#0d99ff" strokeWidth={2 / canvas.scale} pointerEvents="none" />
         {handles.map(h => (
           <rect key={h.name} x={h.x - half} y={h.y - half} width={hs} height={hs}
             fill="white" stroke="#0d99ff" strokeWidth={2 / canvas.scale} className="hover:fill-[#0d99ff]" />
         ))}
         {/* Rotation handle */}
-        <line x1={obj.x + obj.width / 2} y1={obj.y} x2={rotHandleX} y2={rotHandleY}
+        <line x1={ox + obj.width / 2} y1={oy} x2={rotHandleX} y2={rotHandleY}
           stroke="#0d99ff" strokeWidth={1 / canvas.scale} pointerEvents="none" />
         <circle cx={rotHandleX} cy={rotHandleY} r={4 / canvas.scale}
           fill="white" stroke="#0d99ff" strokeWidth={2 / canvas.scale} style={{ cursor: 'grab' }} />
@@ -770,12 +790,12 @@ export function Canvas() {
 
         {allObjects.map(renderObject)}
 
-        {/* Resize + rotation handles */}
-        {objects.filter(obj => selectedIds.includes(obj.id) && !obj.locked && selectedIds.length === 1).map(obj => (
+        {/* Resize + rotation handles for top-level objects */}
+        {!enteredGroupId && objects.filter(obj => selectedIds.includes(obj.id) && !obj.locked && selectedIds.length === 1).map(obj => (
           <React.Fragment key={obj.id}>{renderResizeHandles(obj)}</React.Fragment>
         ))}
 
-        {/* Entered group boundary + selected children highlights */}
+        {/* Entered group boundary + resize/rotate handles for selected children */}
         {enteredGroupId && (() => {
           const group = objects.find(o => o.id === enteredGroupId);
           if (!group) return null;
@@ -786,11 +806,16 @@ export function Canvas() {
                 strokeDasharray={`${6 / canvas.scale} ${3 / canvas.scale}`}
                 pointerEvents="none" opacity={0.5} />
               {group.children?.filter(c => selectedIds.includes(c.id)).map(child => (
-                <rect key={`sel-${child.id}`}
-                  x={group.x + child.x - 1} y={group.y + child.y - 1}
-                  width={child.width + 2} height={child.height + 2}
-                  fill="none" stroke="#0d99ff" strokeWidth={2 / canvas.scale}
-                  pointerEvents="none" />
+                <React.Fragment key={`sel-${child.id}`}>
+                  {selectedIds.length === 1 && !child.locked
+                    ? renderResizeHandles(child, group.x + child.x, group.y + child.y)
+                    : <rect
+                        x={group.x + child.x - 1} y={group.y + child.y - 1}
+                        width={child.width + 2} height={child.height + 2}
+                        fill="none" stroke="#0d99ff" strokeWidth={2 / canvas.scale}
+                        pointerEvents="none" />
+                  }
+                </React.Fragment>
               ))}
             </>
           );
@@ -819,12 +844,13 @@ export function Canvas() {
 
       {/* Inline text editing overlay */}
       {editingTextId && (() => {
-        const obj = objects.find(o => o.id === editingTextId);
-        if (!obj) return null;
+        const found = findSelectedObj(editingTextId);
+        if (!found) return null;
+        const obj = found.obj;
         const rect = canvasRef.current?.getBoundingClientRect();
         if (!rect) return null;
-        const left = obj.x * canvas.scale + canvas.offsetX + rect.left;
-        const top = obj.y * canvas.scale + canvas.offsetY + rect.top;
+        const left = found.absX * canvas.scale + canvas.offsetX + rect.left;
+        const top = found.absY * canvas.scale + canvas.offsetY + rect.top;
         return (
           <input ref={textInputRef} type="text" value={obj.text || ''}
             onChange={(e) => updateObject(obj.id, { text: e.target.value })}

@@ -4,7 +4,7 @@ import { useEditorStore } from '@/lib/store';
 import { useState, useEffect, useRef } from 'react';
 
 export function PropertiesPanel() {
-  const { objects, selectedIds, updateObject } = useEditorStore();
+  const { objects, selectedIds, updateObject, enteredGroupId } = useEditorStore();
   const [localValues, setLocalValues] = useState({
     x: 0, y: 0, width: 100, height: 100,
     fill: '#0d99ff', stroke: '#000000', strokeWidth: 0, opacity: 1,
@@ -12,7 +12,20 @@ export function PropertiesPanel() {
     borderRadius: 0, points: 5,
   });
 
-  const selectedObject = objects.find((obj) => obj.id === selectedIds[0]);
+  // Search top-level and inside groups
+  const findObject = (id: string) => {
+    const top = objects.find(o => o.id === id);
+    if (top) return top;
+    for (const o of objects) {
+      if (o.children) {
+        const child = o.children.find(c => c.id === id);
+        if (child) return child;
+      }
+    }
+    return undefined;
+  };
+
+  const selectedObject = findObject(selectedIds[0]);
   const focusedInput = useRef<string | null>(null);
 
   // Sync from store to local — but skip fields the user is actively editing
