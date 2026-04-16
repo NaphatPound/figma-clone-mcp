@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useEditorStore } from '@/lib/store';
 import { DesignObject, SnapGuide } from '@/lib/types';
-import { generateId, pointInRect, distance, rectsOverlap, computeSnapGuides, starPath, polygonPath } from '@/lib/utils';
+import { generateId, pointInRect, distance, rectsOverlap, computeSnapGuides, starPath, polygonPath, getRotatedPoint } from '@/lib/utils';
 import { Upload } from 'lucide-react';
 import { ContextMenu } from './ContextMenu';
 
@@ -39,7 +39,7 @@ export function Canvas() {
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const [dragObjectStarts, setDragObjectStarts] = useState<Record<string, { x: number; y: number }>>({});
-  const [resizeStart, setResizeStart] = useState({ x: 0, y: 0, width: 0, height: 0, objX: 0, objY: 0 });
+  const [resizeStart, setResizeStart] = useState({ x: 0, y: 0, width: 0, height: 0, objX: 0, objY: 0, rotation: 0 });
   const [rotateStart, setRotateStart] = useState({ angle: 0, objRotation: 0 });
   const [snapGuides, setSnapGuides] = useState<SnapGuide[]>([]);
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
@@ -91,9 +91,25 @@ export function Canvas() {
     return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); };
   }, []);
 
+  // Unrotate a canvas point into the object's local (axis-aligned) space.
+  // Applies the inverse rotation matrix (transpose) to convert screen coords to local coords.
+  const unrotatePoint = useCallback((px: number, py: number, obj: DesignObject, absX?: number, absY?: number) => {
+    const ox = absX ?? obj.x, oy = absY ?? obj.y;
+    if (!obj.rotation) return { x: px, y: py };
+    const cx = ox + obj.width / 2, cy = oy + obj.height / 2;
+    const rad = (obj.rotation * Math.PI) / 180;
+    const cos = Math.cos(rad), sin = Math.sin(rad);
+    return {
+      x: cos * (px - cx) + sin * (py - cy) + cx,
+      y: -sin * (px - cx) + cos * (py - cy) + cy,
+    };
+  }, []);
+
   // absX/absY: absolute position on canvas (for group children: group.x + child.x)
   const getResizeHandleAtPoint = useCallback((x: number, y: number, obj: DesignObject, absX?: number, absY?: number): ResizeHandle => {
     const ox = absX ?? obj.x, oy = absY ?? obj.y;
+    // Unrotate the mouse point so we can check against axis-aligned handle positions
+    const p = unrotatePoint(x, y, obj, ox, oy);
     const handles = [
       { name: 'nw' as const, x: ox, y: oy },
       { name: 'n' as const, x: ox + obj.width / 2, y: oy },
@@ -105,18 +121,19 @@ export function Canvas() {
       { name: 'w' as const, x: ox, y: oy + obj.height / 2 },
     ];
     for (const h of handles) {
-      if (distance(x, y, h.x, h.y) <= HANDLE_HIT_SIZE) return h.name;
+      if (distance(p.x, p.y, h.x, h.y) <= HANDLE_HIT_SIZE) return h.name;
     }
     return null;
-  }, [HANDLE_HIT_SIZE]);
+  }, [HANDLE_HIT_SIZE, unrotatePoint]);
 
   // Check rotation handle hit (circle above top-center)
   const isOnRotationHandle = useCallback((x: number, y: number, obj: DesignObject, absX?: number, absY?: number): boolean => {
     const ox = absX ?? obj.x, oy = absY ?? obj.y;
+    const p = unrotatePoint(x, y, obj, ox, oy);
     const handleY = oy - 30 / canvas.scale;
     const handleX = ox + obj.width / 2;
-    return distance(x, y, handleX, handleY) <= HANDLE_HIT_SIZE;
-  }, [canvas.scale, HANDLE_HIT_SIZE]);
+    return distance(p.x, p.y, handleX, handleY) <= HANDLE_HIT_SIZE;
+  }, [canvas.scale, HANDLE_HIT_SIZE, unrotatePoint]);
 
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
     if (e.button === 2) return; // right-click handled separately
@@ -155,7 +172,7 @@ export function Canvas() {
             saveToHistory();
             setIsResizing(true);
             setResizeHandle(handle);
-            setResizeStart({ x: point.x, y: point.y, width: found.obj.width, height: found.obj.height, objX: found.obj.x, objY: found.obj.y });
+            setResizeStart({ x: point.x, y: point.y, width: found.obj.width, height: found.obj.height, objX: found.obj.x, objY: found.obj.y, rotation: found.obj.rotation || 0 });
             return;
           }
         }
@@ -281,45 +298,62 @@ export function Canvas() {
       const found = findSelectedObj(selectedIds[0]);
       const obj = found?.obj;
       if (obj && !obj.locked) {
-        const dx = point.x - resizeStart.x;
-        const dy = point.y - resizeStart.y;
-        let newX = resizeStart.objX, newY = resizeStart.objY;
+        // Compute delta in the object's local (unrotated) coordinate space
+        const rad = resizeStart.rotation * Math.PI / 180;
+        const cosN = Math.cos(-rad), sinN = Math.sin(-rad);
+        const rawDx = point.x - resizeStart.x;
+        const rawDy = point.y - resizeStart.y;
+        const dx = cosN * rawDx - sinN * rawDy;
+        const dy = sinN * rawDx + cosN * rawDy;
+
         let newW = resizeStart.width, newH = resizeStart.height;
         const minSize = 10;
         const aspectRatio = resizeStart.width / resizeStart.height;
 
+        // Compute new dimensions from local-space delta
         switch (resizeHandle) {
-          case 'se': newW = Math.max(minSize, resizeStart.width + dx); newH = Math.max(minSize, resizeStart.height + dy); break;
-          case 'e': newW = Math.max(minSize, resizeStart.width + dx); break;
-          case 's': newH = Math.max(minSize, resizeStart.height + dy); break;
-          case 'nw':
-            newW = Math.max(minSize, resizeStart.width - dx); newH = Math.max(minSize, resizeStart.height - dy);
-            if (newW > minSize) newX = resizeStart.objX + dx;
-            if (newH > minSize) newY = resizeStart.objY + dy;
-            break;
-          case 'n': newH = Math.max(minSize, resizeStart.height - dy); if (newH > minSize) newY = resizeStart.objY + dy; break;
-          case 'ne':
-            newW = Math.max(minSize, resizeStart.width + dx); newH = Math.max(minSize, resizeStart.height - dy);
-            if (newH > minSize) newY = resizeStart.objY + dy;
-            break;
-          case 'sw':
-            newW = Math.max(minSize, resizeStart.width - dx); newH = Math.max(minSize, resizeStart.height + dy);
-            if (newW > minSize) newX = resizeStart.objX + dx;
-            break;
-          case 'w': newW = Math.max(minSize, resizeStart.width - dx); if (newW > minSize) newX = resizeStart.objX + dx; break;
+          case 'se': newW = resizeStart.width + dx; newH = resizeStart.height + dy; break;
+          case 'e': newW = resizeStart.width + dx; break;
+          case 's': newH = resizeStart.height + dy; break;
+          case 'nw': newW = resizeStart.width - dx; newH = resizeStart.height - dy; break;
+          case 'n': newH = resizeStart.height - dy; break;
+          case 'ne': newW = resizeStart.width + dx; newH = resizeStart.height - dy; break;
+          case 'sw': newW = resizeStart.width - dx; newH = resizeStart.height + dy; break;
+          case 'w': newW = resizeStart.width - dx; break;
         }
+        newW = Math.max(minSize, newW);
+        newH = Math.max(minSize, newH);
 
         // Aspect ratio lock with shift
         if (shiftHeld && ['nw', 'ne', 'se', 'sw'].includes(resizeHandle)) {
-          if (newW / newH > aspectRatio) {
-            newW = newH * aspectRatio;
-          } else {
-            newH = newW / aspectRatio;
-          }
-          if (resizeHandle === 'nw') { newX = resizeStart.objX + resizeStart.width - newW; newY = resizeStart.objY + resizeStart.height - newH; }
-          if (resizeHandle === 'ne') { newY = resizeStart.objY + resizeStart.height - newH; }
-          if (resizeHandle === 'sw') { newX = resizeStart.objX + resizeStart.width - newW; }
+          if (newW / newH > aspectRatio) newW = newH * aspectRatio;
+          else newH = newW / aspectRatio;
         }
+
+        // Anchor-pinning: keep the opposite point fixed in world space.
+        // Each handle has an anchor (the opposite side) expressed as a fraction of size.
+        const anchors: Record<string, [number, number]> = {
+          nw: [1, 1], n: [0.5, 1], ne: [0, 1], e: [0, 0.5],
+          se: [0, 0], s: [0.5, 0], sw: [1, 0], w: [1, 0.5],
+        };
+        const [fx, fy] = anchors[resizeHandle];
+        const cosA = Math.cos(rad), sinA = Math.sin(rad);
+
+        // Old anchor position in world space
+        const oldCx = resizeStart.objX + resizeStart.width / 2;
+        const oldCy = resizeStart.objY + resizeStart.height / 2;
+        const oldAx = cosA * (fx - 0.5) * resizeStart.width - sinA * (fy - 0.5) * resizeStart.height + oldCx;
+        const oldAy = sinA * (fx - 0.5) * resizeStart.width + cosA * (fy - 0.5) * resizeStart.height + oldCy;
+
+        // Where anchor would land with (startX, startY) + new dimensions
+        const tmpCx = resizeStart.objX + newW / 2;
+        const tmpCy = resizeStart.objY + newH / 2;
+        const tmpAx = cosA * (fx - 0.5) * newW - sinA * (fy - 0.5) * newH + tmpCx;
+        const tmpAy = sinA * (fx - 0.5) * newW + cosA * (fy - 0.5) * newH + tmpCy;
+
+        // Correct position so anchor stays in place
+        const newX = resizeStart.objX + (oldAx - tmpAx);
+        const newY = resizeStart.objY + (oldAy - tmpAy);
 
         updateObject(obj.id, { x: newX, y: newY, width: newW, height: newH });
       }
@@ -398,7 +432,7 @@ export function Canvas() {
       setTempObject(newObject);
     }
 
-    // Cursor for resize handles (works for both top-level and group children)
+    // Cursor for resize handles — rotates with the object's angle
     if (currentTool === 'select' && selectedIds.length === 1 && !isDragging && !isResizing && !isRotating) {
       const found = findSelectedObj(selectedIds[0]);
       if (found && !found.obj.locked) {
@@ -407,8 +441,17 @@ export function Canvas() {
           return;
         }
         const handle = getResizeHandleAtPoint(point.x, point.y, found.obj, found.absX, found.absY);
-        const cursors: Record<string, string> = { nw: 'nwse-resize', se: 'nwse-resize', ne: 'nesw-resize', sw: 'nesw-resize', n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize' };
-        if (canvasRef.current) canvasRef.current.style.cursor = handle ? cursors[handle] || 'default' : 'default';
+        if (handle && canvasRef.current) {
+          // Base angle for each handle (degrees, clockwise from north)
+          const baseAngles: Record<string, number> = { n: 0, ne: 45, e: 90, se: 135, s: 180, sw: 225, w: 270, nw: 315 };
+          // 4 cursor types cycling every 45°
+          const cursorCycle = ['ns-resize', 'nesw-resize', 'ew-resize', 'nwse-resize'];
+          const angle = ((baseAngles[handle] + (found.obj.rotation || 0)) % 360 + 360) % 360;
+          const idx = Math.round(angle / 45) % 4;
+          canvasRef.current.style.cursor = cursorCycle[idx];
+        } else if (canvasRef.current) {
+          canvasRef.current.style.cursor = 'default';
+        }
       }
     }
   }, [isPanning, panStart, isRotating, rotateStart, shiftHeld, isMarquee, marqueeStart, isResizing, selectedIds, resizeHandle, objects, resizeStart, updateObject, isDragging, drawingStart, currentTool, screenToCanvas, setCanvas, dragStart, dragObjectStarts, getResizeHandleAtPoint, isOnRotationHandle, setSelectedIds, enteredGroupId, findSelectedObj]);
@@ -647,7 +690,7 @@ export function Canvas() {
     e.target.value = '';
   }, [addObject, setSelectedIds, setCurrentTool]);
 
-  // Rendering — handles at absolute canvas coordinates
+  // Rendering — handles rotate with the object
   const renderResizeHandles = (obj: DesignObject, absX?: number, absY?: number) => {
     if (!selectedIds.includes(obj.id) || obj.locked) return null;
     const ox = absX ?? obj.x, oy = absY ?? obj.y;
@@ -660,8 +703,11 @@ export function Canvas() {
     const hs = HANDLE_SIZE, half = hs / 2;
     const rotHandleY = oy - 30 / canvas.scale;
     const rotHandleX = ox + obj.width / 2;
+    // Rotate the entire handles group around the object's center
+    const cx = ox + obj.width / 2, cy = oy + obj.height / 2;
+    const rotation = obj.rotation || 0;
     return (
-      <g className="resize-handles">
+      <g className="resize-handles" transform={`rotate(${rotation} ${cx} ${cy})`}>
         <rect x={ox - 2} y={oy - 2} width={obj.width + 4} height={obj.height + 4}
           fill="none" stroke="#0d99ff" strokeWidth={2 / canvas.scale} pointerEvents="none" />
         {handles.map(h => (
